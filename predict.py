@@ -4,7 +4,9 @@ import numpy as np
 import datetime
 import requests
 import argparse
+import random
 import pygrib
+import gmplot
 import time
 import math
 import os
@@ -22,6 +24,7 @@ parser.add_argument('-M', '--mass', help='The total mass of the balloon includin
 parser.add_argument('-t', '--time', help='The unix timestamp at the start of the simulation', type=float, default=time.time())
 parser.add_argument('-b', '--burst', help='This flag indicates that the balloon has burst prior to the start of the simulation.', action='store_true')
 parser.add_argument('-s', '--step', help='Time in seconds between simulation steps', type=float, default=1)
+parser.add_argument('-S', '--sigma', help='Variance to add to random variables for monte carlo analysis', type=float, default=0.2)
 args = parser.parse_args()
 
 gribs = {}
@@ -31,7 +34,7 @@ def get_grib(timestamp):
     dt = datetime.datetime.fromtimestamp(timestamp)
     if dt.date() > datetime.datetime.now().date():
         calc_day = datetime.datetime.now().strftime("%Y%m%d")
-        calc_hour = (dt.time().hour // 6) * 6
+        calc_hour = (datetime.datetime.now().time().hour // 6) * 6
         model_hour = (dt - datetime.datetime.now()).seconds // 3600
     else:
         calc_day = dt.strftime("%Y%m%d")
@@ -96,6 +99,7 @@ def get_weather(timestamp, latitude, longitude, altitude):
             if altidx > 0:
                 altidx -= 1
         height, pressure = heights[altidx]
+        windv, windu = 0, 0
         for layer in grib.select(name='U component of wind'):
             if layer['scaledValueOfFirstFixedSurface'] == pressure:
                 windu = layer.values[latidx][lonidx]
@@ -108,22 +112,37 @@ def get_weather(timestamp, latitude, longitude, altitude):
     interpolators[cache_key] = RegularGridInterpolator(((points[0][0], points[7][0]), (points[0][1], points[7][1]), (points[0][2], points[7][2])), data)
     return interpolators[cache_key](np.array([latitude, longitude, altitude]))[0]
 
-def simulate(sim_time, latitude, longitude, altitude, weather):
+def simulate(sim_time, latitude, longitude, altitude, burst, weather):
     time_step = args.step
-    dlat = (weather[0] * time_step) / EARTH_RADIUS
-    dlon = (weather[1] * time_step) / (EARTH_RADIUS*math.cos(math.pi*latitude/180))
+    dlat = (weather[1] * (time_step * (random.random() * args.sigma + (1-args.sigma/2)))) / EARTH_RADIUS
+    dlon = (weather[0] * (time_step * (random.random() * args.sigma + (1-args.sigma/2)))) / (EARTH_RADIUS*math.cos(math.pi*latitude/180))
     latitude += dlat * 180 / math.pi
     longitude += dlon * 180 / math.pi
-    altitude += 5 * time_step
+    if altitude > 33000:
+        burst = True
+    if burst:
+        altitude += -5 * time_step * (random.random() * args.sigma + (1-args.sigma/2))
+    else:
+        altitude += 5 * time_step * (random.random() * args.sigma + (1-args.sigma/2))
     sim_time += time_step
-    return sim_time, latitude, longitude, altitude
+    return sim_time, latitude, longitude, altitude, burst
 
-lat = float(args.latitude)
-lon = float(args.longitude)
-alt = float(args.altitude)
-sim_time = float(args.time)
-
-for i in range(100):
-    weather = get_weather(sim_time, lat, lon, alt)
-    sim_time, lat, lon, alt = simulate(sim_time, lat, lon, alt, weather)
-    print(lat, lon)
+latitudes = []
+longitudes = []
+for run in range(100):
+    lat = float(args.latitude)
+    lon = float(args.longitude)
+    alt = float(args.altitude)
+    sim_time = float(args.time)
+    burst = bool(args.burst)
+    for i in range(1000):
+        weather = get_weather(sim_time, lat, lon, alt)
+        sim_time, lat, lon, alt, burst = simulate(sim_time, lat, lon, alt, burst, weather)
+        if alt < args.altitude:
+            break
+    latitudes.append(lat)
+    longitudes.append(lon)
+gmap = gmplot.GoogleMapPlotter(args.latitude, args.longitude, 12)
+gmap.heatmap(latitudes, longitudes)
+gmap.apikey = ""
+gmap.draw("heatmap.html")
